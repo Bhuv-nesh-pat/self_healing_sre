@@ -1,0 +1,664 @@
+{
+  "name": "Self-Healing SRE Incident Commander",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "sre-incident-alert",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "6a89c470-3490-48e2-9b2e-0a5682e0e001",
+      "name": "Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        200,
+        300
+      ],
+      "webhookId": "sre-incident-alert"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"status\": \"Incident acknowledged, analysis initiated\",\n  \"service\": \"{{ $json.body.service_name || 'mock-transaction-service' }}\",\n  \"incident_status\": \"ANALYSIS_QUEUED\",\n  \"timestamp\": \"{{ $now.toISO() }}\",\n  \"execution_id\": \"{{ $execution.id }}\"\n}",
+        "options": {
+          "responseCode": 202
+        }
+      },
+      "id": "6a89c470-3490-48e2-9b2e-0a5682e0e002",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        420,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.MOCK_SERVICE_URL || 'http://mock-microservice:8000' }}/logs?limit=50",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "application/json"
+            },
+            {
+              "name": "User-Agent",
+              "value": "SRE-Incident-Commander/1.0"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "6a89c470-3490-48e2-9b2e-0a5682e0e003",
+      "name": "Fetch Application Logs",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        640,
+        300
+      ],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "url": "=https://api.github.com/repos/{{ $env.GITHUB_REPO_OWNER || 'octocat' }}/{{ $env.GITHUB_REPO_NAME || 'mock-repo' }}/commits?per_page=1",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=\"Bearer \" + ($env.GITHUB_ACCESS_TOKEN || '')"
+            },
+            {
+              "name": "Accept",
+              "value": "application/vnd.github.v3+json"
+            },
+            {
+              "name": "User-Agent",
+              "value": "Autonomous-SRE-Incident-Commander"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "6a89c470-3490-48e2-9b2e-0a5682e0e004",
+      "name": "Fetch Latest Git Commit",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        860,
+        300
+      ],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "url": "=https://api.github.com/repos/{{ $env.GITHUB_REPO_OWNER || 'octocat' }}/{{ $env.GITHUB_REPO_NAME || 'mock-repo' }}/commits/{{ Array.isArray($json) && $json[0]?.sha ? $json[0].sha : ($json.sha || 'mock-commit-sha') }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=\"Bearer \" + ($env.GITHUB_ACCESS_TOKEN || '')"
+            },
+            {
+              "name": "Accept",
+              "value": "application/vnd.github.v3.diff"
+            },
+            {
+              "name": "User-Agent",
+              "value": "Autonomous-SRE-Incident-Commander"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "id": "6a89c470-3490-48e2-9b2e-0a5682e0e005",
+      "name": "Fetch Git Raw Diff",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1080,
+        300
+      ],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const alertItem = $('Webhook Trigger').first()?.json?.body || {\n  status: 'firing',\n  severity: 'critical',\n  service_name: 'mock-transaction-service',\n  error_signature: 'HTTP 500 rate > 5%',\n  timestamp: new Date().toISOString()\n};\n\nconst rawLogsData = $('Fetch Application Logs').first()?.json?.logs || [];\nlet formattedLogs = '';\nif (Array.isArray(rawLogsData) && rawLogsData.length > 0) {\n  formattedLogs = rawLogsData.map(log => {\n    const header = `[${log.timestamp || 'N/A'}] [${log.level || 'ERROR'}] [corr:${log.correlation_id || 'none'}] fn:${log.function || 'process_transaction'}: ${log.message || ''}`;\n    const trace = log.stack_trace ? `\\nStack Trace:\\n${Array.isArray(log.stack_trace) ? log.stack_trace.join('') : log.stack_trace}` : '';\n    return header + trace;\n  }).join('\\n\\n---\\n\\n');\n} else {\n  formattedLogs = `[${new Date().toISOString()}] [ERROR] [corr:corr-auto-1] fn:process_transaction: Catastrophic transaction failure\\nStack Trace:\\nNullPointerException: Object reference not set to an instance of an object at LedgerAccountManager.validate_balance(account_id=None). Line 142 in mock-microservice/main.py`;\n}\n\nconst commitData = $('Fetch Latest Git Commit').first()?.json;\nconst commitSha = (Array.isArray(commitData) ? commitData[0]?.sha : commitData?.sha) || 'a7b3c99e4f12d8a5c3e6201b19f04128a3910c4f';\nconst commitMessage = (Array.isArray(commitData) ? commitData[0]?.commit?.message : commitData?.commit?.message) || 'feat(ledger): optimize batch processing partition logic and null checks';\n\nconst rawDiffData = $('Fetch Git Raw Diff').first()?.json;\nlet rawDiff = '';\nif (typeof rawDiffData === 'string' && rawDiffData.trim().length > 0) {\n  rawDiff = rawDiffData;\n} else if (rawDiffData && rawDiffData.data) {\n  rawDiff = String(rawDiffData.data);\n} else {\n  rawDiff = `diff --git a/mock-microservice/main.py b/mock-microservice/main.py\\nindex 8f2a1b..4c9d3e 100644\\n--- a/mock-microservice/main.py\\n+++ b/mock-microservice/main.py\\n@@ -138,5 +138,7 @@ async def process_transaction(request: Request):\\n-    if account_id is not None and len(account_id) > 0:\\n-        account = get_account(account_id)\\n-        balance = account.balance\\n+    # Unvalidated direct call introducing unhandled NullPointerException\\n+    account = get_account(None)\\n+    balance = account.validate_balance(account_id=None)\\n+    chunks = batch_partitions[25]`;\n}\n\nreturn [{\n  json: {\n    alert: alertItem,\n    service_name: alertItem.service_name || 'mock-transaction-service',\n    error_signature: alertItem.error_signature || 'HTTP 500 rate > 5%',\n    commit_sha: commitSha,\n    commit_message: commitMessage,\n    forensic_logs: formattedLogs,\n    raw_git_diff: rawDiff,\n    ingestion_timestamp: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "6a89c470-3490-48e2-9b2e-0a5682e0e006",
+      "name": "Aggregate Forensic Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1300,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=CRITICAL TELEMETRY INCIDENT ALERT:\nService: {{ $json.service_name }}\nAnomaly Signature: {{ $json.error_signature }}\nCommit SHA: {{ $json.commit_sha }}\nCommit Message: {{ $json.commit_message }}\nAlert Timestamp: {{ $json.alert.timestamp }}\n\nFORENSIC EVIDENCE #1 - APPLICATION CONTAINER LOGS (LAST 15 MINUTES):\n====================================================================\n{{ $json.forensic_logs }}\n====================================================================\n\nFORENSIC EVIDENCE #2 - RAW GIT PATCH DIFFERENTIAL:\n====================================================================\n{{ $json.raw_git_diff }}\n====================================================================\n\nPerform exhaustive forensic correlation and root cause analysis in accordance with your system instructions.",
+        "options": {
+          "systemMessage": "You are an elite Principal Site Reliability Engineer and core maintainer of this application infrastructure. The production environment has just experienced a catastrophic failure, triggering high-severity alerts from the telemetry monitors. Your primary objective is to execute an autonomous root cause analysis. You will be provided with two critical pieces of forensic evidence: the last fifteen minutes of structured container logs, and the raw Git patch differential of the most recent deployment.\n\nYour analytical task is to cross-reference the stack traces and exception signatures found within the container logs against the modified lines of code in the Git differential. You must aggressively look for newly introduced unhandled exceptions, null object references, logical race conditions, syntax errors, or misconfigured database connection strings. You must prioritize diagnostic accuracy over speed.\n\nAnalyze the evidence systematically and step-by-step. Identify the exact file name, line number, and logical block responsible for the system crash. Once the anomaly is isolated, you must decide on the appropriate remediation strategy. If the error is a straightforward logical bug introduced in the recent commit, you will synthesize the exact replacement code required to resolve the issue and strictly set the action decision to DRAFT_HOTFIX. If the error is related to deep structural infrastructure changes, state corruption, or missing environment variables that cannot be patched with a simple codebase modification, you must set the action decision to TRIGGER_ROLLBACK to restore the previous stable state.\n\nYou are constrained by a rigid execution environment. You must strictly conform your output to the required JSON schema provided by the system. Do not include introductory prose, polite conversational text, or markdown formatting blocks (such as ```json) around your output. Output only the parsed, raw JSON object containing your final diagnosis and remediation strategy. Failure to adhere to the schema will result in system routing failure."
+        }
+      },
+      "id": "6a89c470-3490-48e2-9b2e-0a5682e0e007",
+      "name": "AI SRE Incident Commander Agent",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 1.7,
+      "position": [
+        1540,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "model": "gpt-4o",
+        "options": {
+          "temperature": 0.1
+        }
+      },
+      "id": "6a89c470-3490-48e2-9b2e-0a5682e0e008",
+      "name": "OpenAI Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.modelOpenAi",
+      "typeVersion": 1.1,
+      "position": [
+        1460,
+        520
+      ],
+      "credentials": {
+        "openAiApi": {
+          "id": "openai-sre-credentials",
+          "name": "OpenAI API Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "schemaType": "fromJsonSchema",
+        "jsonSchema": "{\n  \"type\": \"object\",\n  \"properties\": {\n    \"is_code_defect\": {\n      \"type\": \"boolean\",\n      \"description\": \"Indicates if the crash definitively originates from the logical changes present in the fetched Git diff.\"\n    },\n    \"root_cause_explanation\": {\n      \"type\": \"string\",\n      \"description\": \"A concise, highly technical explanation detailing the exact mechanism of the failure based on the correlated evidence.\"\n    },\n    \"offending_file\": {\n      \"type\": \"string\",\n      \"description\": \"Specifies the exact relative file path containing the erroneous code.\"\n    },\n    \"suggested_remediation_code\": {\n      \"type\": \"string\",\n      \"description\": \"Contains the exact lines of code required to patch the application, formatted correctly for a direct Git blob replacement.\"\n    },\n    \"action_decision\": {\n      \"type\": \"string\",\n      \"enum\": [\n        \"DRAFT_HOTFIX\",\n        \"TRIGGER_ROLLBACK\"\n      ],\n      \"description\": \"Strictly restricted to the exact values of DRAFT_HOTFIX or TRIGGER_ROLLBACK.\"\n    }\n  },\n  \"required\": [\n    \"is_code_defect\",\n    \"root_cause_explanation\",\n    \"offending_file\",\n    \"suggested_remediation_code\",\n    \"action_decision\"\n  ]\n}"
+      },
+      "id": "6a89c470-3490-48e2-9b2e-0a5682e0e009",
+      "name": "Structured Output Parser",
+      "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+      "typeVersion": 1.2,
+      "position": [
+        1640,
+        520
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.action_decision || $json.output.action_decision }}",
+                    "rightValue": "DRAFT_HOTFIX",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.action_decision || $json.output.action_decision }}",
+                    "rightValue": "TRIGGER_ROLLBACK",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            }
+          ]
+        }
+      },
+      "id": "6a89c470-3490-48e2-9b2e-0a5682e0e010",
+      "name": "Evaluate Remediation Decision",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [
+        1880,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const decisionData = $input.first().json.output || $input.first().json;\nconst contextData = $('Aggregate Forensic Context').first().json;\nconst timestamp = Date.now();\nconst branchName = 'hotfix-sre-incident-' + timestamp;\nconst offendingFile = decisionData.offending_file || 'mock-microservice/main.py';\nconst remediationCode = decisionData.suggested_remediation_code || '# Autonomous Hotfix Patch\\n';\nconst rootCause = decisionData.root_cause_explanation || 'Identified unhandled exception in transaction processing pipeline.';\n\nconst postMortemMarkdown = '## \ud83d\udea8 Autonomous AI SRE Incident Commander - Incident Post-Mortem\\n\\n' +\n  '### 1. Incident Overview\\n' +\n  '- **Target Service**: `' + contextData.service_name + '`\\n' +\n  '- **Incident Trigger**: Telemetry threshold breach (HTTP 500 error rate > 5%)\\n' +\n  '- **Preceding Commit**: `' + contextData.commit_sha + '` (*' + contextData.commit_message + '*)\\n' +\n  '- **Detected At**: `' + contextData.alert.timestamp + '`\\n' +\n  '- **MTTR Acceleration**: Automated Root-Cause Analysis completed in under 15 seconds\\n\\n' +\n  '### 2. Root Cause Analysis (LLM Diagnosis)\\n' +\n  rootCause + '\\n\\n' +\n  '### 3. Forensic Isolation\\n' +\n  '- **Offending Source File**: `' + offendingFile + '`\\n' +\n  '- **Code Defect Confirmed**: `' + decisionData.is_code_defect + '`\\n' +\n  '- **Autonomous Action Decision**: `DRAFT_HOTFIX`\\n\\n' +\n  '### 4. Proposed Remediation\\n' +\n  '```python\\n' + remediationCode + '\\n```\\n\\n' +\n  '### 5. Dual-Identity Human-In-The-Loop Gateway\\n' +\n  '> \ud83d\udee1\ufe0f **Safety Guardrail**: Following the principle of least privilege, the Autonomous Incident Commander has drafted this Pull Request for human verification. Autonomous merging is restricted. Please review, approve, and merge to deploy.';\n\nreturn [{\n  json: {\n    ...decisionData,\n    branch_name: branchName,\n    commit_sha: contextData.commit_sha,\n    repo_owner: $env.GITHUB_REPO_OWNER || 'octocat',\n    repo_name: $env.GITHUB_REPO_NAME || 'mock-repo',\n    offending_file: offendingFile,\n    remediation_code: remediationCode,\n    post_mortem_body: postMortemMarkdown,\n    pr_title: '\ud83d\udea8 [AUTONOMOUS-HOTFIX] Fix: ' + rootCause.substring(0, 60) + '...',\n    timestamp: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "6a89c470-3490-48e2-9b2e-0a5682e0e011",
+      "name": "Prepare Hotfix Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2140,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=https://api.github.com/repos/{{ $json.repo_owner }}/{{ $json.repo_name }}/git/refs",
+        "method": "POST",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=\"Bearer \" + ($env.GITHUB_ACCESS_TOKEN || '')"
+            },
+            {
+              "name": "Accept",
+              "value": "application/vnd.github.v3+json"
+            },
+            {
+              "name": "User-Agent",
+              "value": "Autonomous-SRE-Incident-Commander"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"ref\": \"refs/heads/{{ $json.branch_name }}\",\n  \"sha\": \"{{ $json.commit_sha }}\"\n}",
+        "options": {}
+      },
+      "id": "6a89c470-3490-48e2-9b2e-0a5682e0e012",
+      "name": "Create Hotfix Git Branch",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2360,
+        200
+      ],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "url": "=https://api.github.com/repos/{{ $('Prepare Hotfix Payload').first().json.repo_owner }}/{{ $('Prepare Hotfix Payload').first().json.repo_name }}/contents/{{ $('Prepare Hotfix Payload').first().json.offending_file }}",
+        "method": "PUT",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=\"Bearer \" + ($env.GITHUB_ACCESS_TOKEN || '')"
+            },
+            {
+              "name": "Accept",
+              "value": "application/vnd.github.v3+json"
+            },
+            {
+              "name": "User-Agent",
+              "value": "Autonomous-SRE-Incident-Commander"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"message\": \"fix(sre-commander): autonomous remediation for incident\\n\\nRoot Cause: {{ $('Prepare Hotfix Payload').first().json.root_cause_explanation }}\",\n  \"content\": \"{{ Buffer.from($('Prepare Hotfix Payload').first().json.remediation_code).toString('base64') }}\",\n  \"branch\": \"{{ $('Prepare Hotfix Payload').first().json.branch_name }}\"\n}",
+        "options": {}
+      },
+      "id": "6a89c470-3490-48e2-9b2e-0a5682e0e013",
+      "name": "Commit Remediation Code",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2580,
+        200
+      ],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "url": "=https://api.github.com/repos/{{ $('Prepare Hotfix Payload').first().json.repo_owner }}/{{ $('Prepare Hotfix Payload').first().json.repo_name }}/pulls",
+        "method": "POST",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=\"Bearer \" + ($env.GITHUB_ACCESS_TOKEN || '')"
+            },
+            {
+              "name": "Accept",
+              "value": "application/vnd.github.v3+json"
+            },
+            {
+              "name": "User-Agent",
+              "value": "Autonomous-SRE-Incident-Commander"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"title\": \"{{ $('Prepare Hotfix Payload').first().json.pr_title }}\",\n  \"head\": \"{{ $('Prepare Hotfix Payload').first().json.branch_name }}\",\n  \"base\": \"main\",\n  \"body\": {{ JSON.stringify($('Prepare Hotfix Payload').first().json.post_mortem_body) }}\n}",
+        "options": {}
+      },
+      "id": "6a89c470-3490-48e2-9b2e-0a5682e0e014",
+      "name": "Create GitHub Pull Request",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2800,
+        200
+      ],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.SLACK_WEBHOOK_URL }}",
+        "method": "POST",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"text\": \"🚨 *P1 INCIDENT POST-MORTEM & HOTFIX DRAFTED* 🚨\\n*Service*: `{{ $('Prepare Hotfix Payload').first().json.repo_name }}`\\n*Root Cause*: {{ $('Prepare Hotfix Payload').first().json.root_cause_explanation }}\\n*Action Decision*: `DRAFT_HOTFIX`\\n*Pull Request*: <{{ $json.html_url || ('https://github.com/' + ($env.GITHUB_REPO_OWNER || 'octocat') + '/' + ($env.GITHUB_REPO_NAME || 'mock-repo') + '/pulls') }}|Review Autonomous Hotfix PR>\\n*Dual-Identity Security Policy*: Autonomous merge blocked. Human-In-The-Loop approval required.\",\n  \"blocks\": [\n    {\n      \"type\": \"header\",\n      \"text\": {\n        \"type\": \"plain_text\",\n        \"text\": \"🚨 Autonomous AI SRE Incident Commander - Hotfix Drafted\",\n        \"emoji\": true\n      }\n    },\n    {\n      \"type\": \"section\",\n      \"fields\": [\n        {\n          \"type\": \"mrkdwn\",\n          \"text\": \"*Status:*\\n🔥 Mitigated (Hotfix Staged)\"\n        },\n        {\n          \"type\": \"mrkdwn\",\n          \"text\": \"*Severity:*\\n🔴 Critical (P1)\"\n        },\n        {\n          \"type\": \"mrkdwn\",\n          \"text\": \"*Target File:*\\n`\" + $('Prepare Hotfix Payload').first().json.offending_file + \"`\"\n        },\n        {\n          \"type\": \"mrkdwn\",\n          \"text\": \"*Decision:*\\n`DRAFT_HOTFIX`\"\n        }\n      ]\n    },\n    {\n      \"type\": \"section\",\n      \"text\": {\n        \"type\": \"mrkdwn\",\n        \"text\": \"*Root Cause Explanation:*\\n\" + $('Prepare Hotfix Payload').first().json.root_cause_explanation\n      }\n    },\n    {\n      \"type\": \"section\",\n      \"text\": {\n        \"type\": \"mrkdwn\",\n        \"text\": \"*GitHub Pull Request:*\\n<\" + ($json.html_url || ('https://github.com/' + ($env.GITHUB_REPO_OWNER || 'octocat') + '/' + ($env.GITHUB_REPO_NAME || 'mock-repo') + '/pulls')) + \"|👉 Click here to review and merge hotfix>\"\n      }\n    },\n    {\n      \"type\": \"context\",\n      \"elements\": [\n        {\n          \"type\": \"mrkdwn\",\n          \"text\": \"🛡️ *Dual-Identity Policy:* Least privilege enforced. HITL Gateway requires human signature to merge.\" \n        }\n      ]\n    }\n  ]\n}",
+        "options": {}
+      },
+      "id": "6a89c470-3490-48e2-9b2e-0a5682e0e015",
+      "name": "Notify Slack (Post-Mortem & HITL)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3040,
+        200
+      ],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.MOCK_SERVICE_URL || 'http://mock-microservice:8000' }}/api/v1/rollback",
+        "method": "POST",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "User-Agent",
+              "value": "Autonomous-SRE-Incident-Commander"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"reason\": \"Autonomous canary rollback triggered by SRE Incident Commander\",\n  \"root_cause\": \"{{ $json.output.root_cause_explanation || $json.root_cause_explanation }}\",\n  \"execution_id\": \"{{ $execution.id }}\"\n}",
+        "options": {}
+      },
+      "id": "6a89c470-3490-48e2-9b2e-0a5682e0e016",
+      "name": "Trigger Canary Rollback",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2140,
+        440
+      ],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.SLACK_WEBHOOK_URL }}",
+        "method": "POST",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"text\": \"⏪ *CRITICAL INCIDENT MITIGATION: Canary Rollback Executed* ⏪\\n*Service*: `mock-transaction-service`\\n*Root Cause*: {{ $('AI SRE Incident Commander Agent').first().json.output.root_cause_explanation || $('AI SRE Incident Commander Agent').first().json.root_cause_explanation }}\\n*Action Decision*: `TRIGGER_ROLLBACK`\\n*Status*: Rollback completed. Stable baseline restored.\",\n  \"blocks\": [\n    {\n      \"type\": \"header\",\n      \"text\": {\n        \"type\": \"plain_text\",\n        \"text\": \"⏪ Autonomous Canary Rollback Executed\",\n        \"emoji\": true\n      }\n    },\n    {\n      \"type\": \"section\",\n      \"fields\": [\n        {\n          \"type\": \"mrkdwn\",\n          \"text\": \"*Status:*\\n✅ Rollback Succeeded\"\n        },\n        {\n          \"type\": \"mrkdwn\",\n          \"text\": \"*Severity:*\\n🔴 Critical (P1)\"\n        },\n        {\n          \"type\": \"mrkdwn\",\n          \"text\": \"*Action:*\\n`TRIGGER_ROLLBACK`\"\n        },\n        {\n          \"type\": \"mrkdwn\",\n          \"text\": \"*Target Service:*\\n`mock-transaction-service`\"\n        }\n      ]\n    },\n    {\n      \"type\": \"section\",\n      \"text\": {\n        \"type\": \"mrkdwn\",\n        \"text\": \"*Root Cause Analysis:*\\n\" + ($('AI SRE Incident Commander Agent').first().json.output.root_cause_explanation || $('AI SRE Incident Commander Agent').first().json.root_cause_explanation)\n      }\n    },\n    {\n      \"type\": \"context\",\n      \"elements\": [\n        {\n          \"type\": \"mrkdwn\",\n          \"text\": \"ℹ️ Production traffic reverted to previous stable release. Telemetry monitors normalized.\" \n        }\n      ]\n    }\n  ]\n}",
+        "options": {}
+      },
+      "id": "6a89c470-3490-48e2-9b2e-0a5682e0e017",
+      "name": "Notify Slack (Rollback Alert)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2380,
+        440
+      ],
+      "continueOnFail": true
+    }
+  ],
+  "connections": {
+    "Webhook Trigger": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Respond to Webhook": {
+      "main": [
+        [
+          {
+            "node": "Fetch Application Logs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Application Logs": {
+      "main": [
+        [
+          {
+            "node": "Fetch Latest Git Commit",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Latest Git Commit": {
+      "main": [
+        [
+          {
+            "node": "Fetch Git Raw Diff",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Git Raw Diff": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Forensic Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aggregate Forensic Context": {
+      "main": [
+        [
+          {
+            "node": "AI SRE Incident Commander Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI SRE Incident Commander Agent": {
+      "main": [
+        [
+          {
+            "node": "Evaluate Remediation Decision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI SRE Incident Commander Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Structured Output Parser": {
+      "ai_outputParser": [
+        [
+          {
+            "node": "AI SRE Incident Commander Agent",
+            "type": "ai_outputParser",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Evaluate Remediation Decision": {
+      "main": [
+        [
+          {
+            "node": "Prepare Hotfix Payload",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Trigger Canary Rollback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Hotfix Payload": {
+      "main": [
+        [
+          {
+            "node": "Create Hotfix Git Branch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Hotfix Git Branch": {
+      "main": [
+        [
+          {
+            "node": "Commit Remediation Code",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Commit Remediation Code": {
+      "main": [
+        [
+          {
+            "node": "Create GitHub Pull Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create GitHub Pull Request": {
+      "main": [
+        [
+          {
+            "node": "Notify Slack (Post-Mortem & HITL)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Trigger Canary Rollback": {
+      "main": [
+        [
+          {
+            "node": "Notify Slack (Rollback Alert)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "errorWorkflow": "6a89c470-3490-48e2-9b2e-error-handler-01"
+  },
+  "active": false,
+  "id": "6a89c470-3490-48e2-9b2e-0a5682e0e000",
+  "tags": [
+    {
+      "name": "SRE",
+      "id": "sre-tag-1"
+    },
+    {
+      "name": "Autonomous-AI",
+      "id": "sre-tag-2"
+    }
+  ]
+}

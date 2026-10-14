@@ -1,0 +1,115 @@
+services:
+  # ----------------------------------------------------------------------------
+  # PostgreSQL: Persistent State Database for n8n Workflows & Execution Data
+  # ----------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: sre-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_POSTGRESDB_USER:-sre_admin}
+      POSTGRES_PASSWORD: ${DB_POSTGRESDB_PASSWORD:-sre_high_entropy_password_98234}
+      POSTGRES_DB: ${DB_POSTGRESDB_DATABASE:-n8n_state_db}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_POSTGRESDB_USER:-sre_admin} -d ${DB_POSTGRESDB_DATABASE:-n8n_state_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - sre_mesh
+
+  # ----------------------------------------------------------------------------
+  # n8n Orchestration Engine: Autonomous AI SRE Incident Commander Execution Node
+  # ----------------------------------------------------------------------------
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:latest
+    container_name: sre-n8n-commander
+    restart: unless-stopped
+    ports:
+      - "5678:5678"
+    environment:
+      # Mandatory security directive preventing settings file permission exploits
+      - N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=true
+      # Enables the modern internal task runner architecture for computational workflows
+      - N8N_RUNNERS_ENABLED=true
+      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY:-sre_autonomous_commander_key_secure_2026_xyz}
+      # Database Backend Wiring
+      - DB_TYPE=postgresdb
+      - DB_POSTGRESDB_HOST=postgres
+      - DB_POSTGRESDB_PORT=5432
+      - DB_POSTGRESDB_DATABASE=${DB_POSTGRESDB_DATABASE:-n8n_state_db}
+      - DB_POSTGRESDB_USER=${DB_POSTGRESDB_USER:-sre_admin}
+      - DB_POSTGRESDB_PASSWORD=${DB_POSTGRESDB_PASSWORD:-sre_high_entropy_password_98234}
+      # Networking & Editor Configuration
+      - N8N_PORT=5678
+      - N8N_EDITOR_BASE_URL=${N8N_EDITOR_BASE_URL:-http://localhost:5678}
+      - GENERIC_TIMEZONE=UTC
+      # Execution Environment Injection for Workflow Nodes
+      - GITHUB_ACCESS_TOKEN=${GITHUB_ACCESS_TOKEN:-}
+      - GITHUB_REPO_OWNER=${GITHUB_REPO_OWNER:-octocat}
+      - GITHUB_REPO_NAME=${GITHUB_REPO_NAME:-mock-microservice}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL:-}
+      - MOCK_SERVICE_URL=http://mock-microservice:8000
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ./n8n-workflows:/n8n-workflows:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - sre_mesh
+
+  # ----------------------------------------------------------------------------
+  # Mock Target Microservice: Intentionally Unstable FastAPI Financial Service
+  # ----------------------------------------------------------------------------
+  mock-microservice:
+    build:
+      context: ./mock-microservice
+      dockerfile: Dockerfile
+    container_name: mock-microservice
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - DEFAULT_FAILURE_PROBABILITY=${DEFAULT_FAILURE_PROBABILITY:-0.20}
+    networks:
+      - sre_mesh
+
+  # ----------------------------------------------------------------------------
+  # Telemetry Event Simulator: Continuous Prometheus Scraper & Alerting Proxy
+  # ----------------------------------------------------------------------------
+  telemetry-simulator:
+    build:
+      context: ./telemetry-simulator
+      dockerfile: Dockerfile
+    container_name: telemetry-simulator
+    restart: unless-stopped
+    environment:
+      - MOCK_SERVICE_URL=http://mock-microservice:8000
+      - N8N_WEBHOOK_URL=${N8N_WEBHOOK_URL:-http://n8n:5678/webhook/sre-incident-alert}
+      - ERROR_THRESHOLD_PERCENT=${ERROR_THRESHOLD_PERCENT:-5.0}
+      - POLL_INTERVAL_SECONDS=${POLL_INTERVAL_SECONDS:-5.0}
+      - ALERT_COOLDOWN_SECONDS=${ALERT_COOLDOWN_SECONDS:-60.0}
+      - AUTO_GENERATE_TRAFFIC=${AUTO_GENERATE_TRAFFIC:-true}
+    depends_on:
+      - mock-microservice
+      - n8n
+    networks:
+      - sre_mesh
+
+# ------------------------------------------------------------------------------
+# Isolated Bridge Network & Persistent Volumes
+# ------------------------------------------------------------------------------
+networks:
+  sre_mesh:
+    driver: bridge
+    name: sre_mesh_network
+
+volumes:
+  postgres_data:
+    name: sre_postgres_data
+  n8n_data:
+    name: sre_n8n_data
