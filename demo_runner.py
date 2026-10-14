@@ -127,11 +127,11 @@ def inspect_metrics_and_logs():
 def trigger_alert_webhook():
     step("Triggering Autonomous Incident Response via Webhook...")
     
-    payload = {
+   payload = {
         "status": "firing",
         "severity": "critical",
         "service_name": "mock-transaction-service",
-        "error_signature": "HTTP 500 rate > 5% (Live Adjudication Demo)",
+        "error_signature": "Null reference in process_transaction function inside mock_service.py",
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "telemetry_source": "AdjudicationDemoRunner"
     }
